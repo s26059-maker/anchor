@@ -67,3 +67,33 @@ func TestGateOffSendsEverything(t *testing.T) {
 		t.Fatalf("게이트 꺼짐: 숨은 적도 전송돼야 하는데 안 됨")
 	}
 }
+
+// ViewerOnly: 적 스스로의 움직임으로 보이게 되는 경우는 절대 선공개하지 않는다(viewer가 안 움직이면).
+func TestViewerOnlyIgnoresEnemyMotion(t *testing.T) {
+	w, viewer, _ := wallWorld(geom.Vec{X: -1.5, Y: 6.3}, geom.Vec{X: 0, Y: 5}) // 적이 다가온다, viewer는 고정
+	g := Gate{Enabled: true, Mode: ViewerOnly, Lookahead: 0.1, Samples: 8}
+	snap := g.Filter(w, viewer, nil)
+	if len(snap.Enemies) != 0 {
+		t.Fatalf("ViewerOnly: 적 자신의 움직임만으로 선공개됨(뜨면 안 됨)")
+	}
+	// 같은 상황, Both 모드라면 (기존 동작으로) 전송돼야 한다 — 대조 확인.
+	gBoth := Gate{Enabled: true, Mode: Both, Lookahead: 0.1, Samples: 8}
+	snapBoth := gBoth.Filter(w, viewer, nil)
+	if len(snapBoth.Enemies) != 1 {
+		t.Fatalf("대조군(Both) 실패: 적의 움직임으로 선공개돼야 하는데 안 됨")
+	}
+}
+
+// ViewerOnly: viewer 자신의 움직임으로 보이게 되는 경우는 여전히 선공개한다(팝인 방지).
+func TestViewerOnlyStillPredictsViewerMotion(t *testing.T) {
+	m := &world.Map{Walls: []geom.Segment{{A: geom.Vec{X: 0, Y: -6}, B: geom.Vec{X: 0, Y: 6}}}}
+	viewer := &world.Player{ID: 1, Team: 0, Pos: geom.Vec{X: -1.5, Y: 6.3}, Vel: geom.Vec{X: 0, Y: 5}, Alive: true}
+	enemy := &world.Player{ID: 2, Team: 1, Pos: geom.Vec{X: 20, Y: 0}, Alive: true} // 고정
+	w := &world.World{Map: m, Players: []*world.Player{viewer, enemy}}
+
+	g := Gate{Enabled: true, Mode: ViewerOnly, Lookahead: 0.1, Samples: 8}
+	snap := g.Filter(w, viewer, nil)
+	if len(snap.Enemies) != 1 {
+		t.Fatalf("ViewerOnly: viewer 자신의 움직임으로는 여전히 선공개돼야 하는데 안 됨")
+	}
+}

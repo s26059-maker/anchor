@@ -29,13 +29,24 @@ const (
 	FastReactThr  = 0.05 // 이 값(초)보다 빨리 에임이 정렬되면 "비정상으로 빠름"
 )
 
+// Role: 누가 월핵을 쓰는가.
+type Role int
+
+const (
+	RoleHolder Role = iota // 기본값. 기존 동작과 같다
+	RolePeeker
+)
+
 type Config struct {
-	Cheat         bool    // 홀더가 월핵을 쓰는가
-	Trust         float64 // 월핵이 벽 뒤 신호를 믿고 움직일 확률
-	Smart         bool    // SmartWallhack: 신호 개수로 미끼를 거르고, 쌍 신호는 타이밍(방향 아님)에만 쓴다
+	Cheat         bool       // CheatRole 쪽이 월핵을 쓰는가
+	Trust         float64    // 월핵이 벽 뒤 신호를 믿고 움직일 확률
+	Smart         bool       // SmartWallhack: 신호 개수로 미끼를 거르고, 쌍 신호는 타이밍(방향 아님)에만 쓴다
+	CheatRole     Role       // 홀더가 치트를 쓰는가(기본), 피커가 쓰는가
+	MinLead       float64    // SmartWallhack 사람 한계: 쌍 신호가 이만큼(초) 앞서 안 뜨면 못 써먹는다(0=기계)
+	Render        bot.Render // 클라이언트가 받은 위치를 그대로 그리는가(Interp), 외삽하는가(Extrapolate)
 	Gate          gate.Gate
 	Latency       float64 // 편도 지연(초)
-	Decoys        bool    // 미끼(거울 미끼 + 무작위 미끼 + 핸들 섞기)
+	Decoys        bool    // 미끼(거울 미끼 + 무작위 미끼 + 핸들 섞기). 홀더가 받는 스트림에만 적용된다
 	Holds         bool    // 홀더가 할 일 없을 때 위·가운데·아래 각도를 번갈아 지킴
 	DecoyPairFreq float64 // 무작위 미끼를 거울 쌍으로 보낼 확률 (0=항상 혼자, 1=항상 쌍)
 }
@@ -48,13 +59,15 @@ type Result struct {
 	FastR     int     // 쌍 신호 뒤 "너무 빠른" 에임 정렬: -1 판정 불가, 0 정상, 1 비정상으로 빠름
 }
 
-func human(r *rand.Rand, aim float64, cheat bool, trust float64, smart bool) *bot.Human {
+func human(r *rand.Rand, aim float64, cheat bool, trust float64, smart bool, minLead float64, render bot.Render) *bot.Human {
 	return &bot.Human{
 		Rng:         r,
 		UsesHidden:  cheat,
 		Trust:       trust,
 		Smart:       smart,
 		PrimeWindow: SmartPrimeWin,
+		MinLead:     minLead,
+		RenderMode:  render,
 		Reaction:    max(0.12, 0.20+0.03*r.NormFloat64()),
 		Omega:       max(300, 600+100*r.NormFloat64()),
 		Settle:      0.04,
@@ -81,14 +94,27 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 	}
 	wait := 0.3 + 2.2*r.Float64()
 
-	hb := human(r, 180, cfg.Cheat, cfg.Trust, cfg.Smart) // 벽 가운데를 보고 시작
+	holderCheat, holderTrust, holderSmart := false, 0.0, false
+	peekerCheat, peekerTrust, peekerSmart := false, 0.0, false
+	if cfg.CheatRole == RolePeeker {
+		peekerCheat, peekerTrust, peekerSmart = cfg.Cheat, cfg.Trust, cfg.Smart
+	} else {
+		holderCheat, holderTrust, holderSmart = cfg.Cheat, cfg.Trust, cfg.Smart
+	}
+
+	hb := human(r, 180, holderCheat, holderTrust, holderSmart, cfg.MinLead, cfg.Render) // 벽 가운데를 보고 시작
 	if cfg.Holds {
 		hb.Holds = []float64{exitAngle(1), 180, exitAngle(-1)}
 		hb.HoldEvery = HoldEvery
 	}
+	pb := human(r, peeker.Pos.AngleTo(holder.Pos)+abs(5+2*r.NormFloat64()), peekerCheat, peekerTrust, peekerSmart, cfg.MinLead, cfg.Render)
 	brains := map[int]*bot.Human{
 		holder.ID: hb,
-		peeker.ID: human(r, peeker.Pos.AngleTo(holder.Pos)+abs(5+2*r.NormFloat64()), false, 0, false),
+		peeker.ID: pb,
+	}
+	cheaterBrain, cheaterPlayer := hb, holder
+	if cfg.CheatRole == RolePeeker {
+		cheaterBrain, cheaterPlayer = pb, peeker
 	}
 	lines := map[int]*netsim.DelayLine{
 		holder.ID: {Delay: cfg.Latency},
@@ -147,16 +173,18 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 				s = st
 			}
 			snap := g.Filter(w, p, s)
-			if p == holder {
+			if p == cheaterPlayer {
 				if tInfo < 0 && len(snap.Enemies) > 0 {
 					tInfo = now
 				}
+			}
+			if p == holder {
 				if cfg.Decoys {
 					var fakes []gate.EnemyView
 					// 거울 미끼: 선공개 중인 진짜 적의 반대편 출구에 똑같이 움직이는 가짜
 					for _, e := range snap.Enemies {
 						if !m.LOS(holder.Pos, e.Pos) {
-							fakes = append(fakes, gate.EnemyView{ID: mirrorH, Pos: geom.Vec{X: e.Pos.X, Y: -e.Pos.Y}})
+							fakes = append(fakes, gate.EnemyView{ID: mirrorH, Pos: geom.Vec{X: e.Pos.X, Y: -e.Pos.Y}, Vel: geom.Vec{X: e.Vel.X, Y: -e.Vel.Y}})
 						}
 					}
 					// 무작위 미끼: 아무 때나 출구 직전까지 왔다가 사라지는 가짜 (증거 수집용).
@@ -164,9 +192,9 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 					// 개수 기반 추론을 무디게 만든다.
 					if now >= dStart && now < dStart+dLen {
 						mag := ExitY - RunSpeed*(dStart+dLen-now)
-						fakes = append(fakes, gate.EnemyView{ID: randH, Pos: geom.Vec{X: PeekX, Y: dSide * mag}})
+						fakes = append(fakes, gate.EnemyView{ID: randH, Pos: geom.Vec{X: PeekX, Y: dSide * mag}, Vel: geom.Vec{X: 0, Y: dSide * RunSpeed}})
 						if pairDecoy {
-							fakes = append(fakes, gate.EnemyView{ID: randH2, Pos: geom.Vec{X: PeekX, Y: -dSide * mag}})
+							fakes = append(fakes, gate.EnemyView{ID: randH2, Pos: geom.Vec{X: PeekX, Y: -dSide * mag}, Vel: geom.Vec{X: 0, Y: -dSide * RunSpeed}})
 						}
 						if !evOn {
 							evOn, evT0 = true, now
@@ -185,9 +213,9 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 		}
 		for _, p := range order {
 			fire, tid := brains[p.ID].Update(now, dt, p, lines[p.ID].View(now), m)
-			if p == holder && !reactLatched && hb.OnScreenAt() >= 0 && hb.AimedAt() >= 0 {
+			if p == cheaterPlayer && !reactLatched && cheaterBrain.OnScreenAt() >= 0 && cheaterBrain.AimedAt() >= 0 {
 				reactLatched = true
-				if hb.AimedAt()-hb.OnScreenAt() < FastReactThr {
+				if cheaterBrain.AimedAt()-cheaterBrain.OnScreenAt() < FastReactThr {
 					fastR = 1
 				} else {
 					fastR = 0

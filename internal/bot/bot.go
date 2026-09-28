@@ -11,6 +11,14 @@ import (
 	"github.com/s26059-maker/anchor/internal/world"
 )
 
+// Render: 클라이언트가 지연된 스냅샷을 어떻게 그리는가.
+type Render int
+
+const (
+	Interp      Render = iota // 기본: 받은 스냅샷 위치를 그대로 그린다(기존 동작)
+	Extrapolate               // dead reckoning: 받은 위치 + 속도 × 경과시간으로 "지금" 위치를 추정해서 그린다
+)
+
 type Human struct {
 	Rng        *rand.Rand
 	UsesHidden bool    // true = 월핵. 벽 뒤 적 데이터도 본다
@@ -19,6 +27,8 @@ type Human struct {
 	// 혼자 오면(=1) 미끼로 보고 완전히 무시(에임 불변). 쌍으로 오면(>=2) 방향은
 	// 얻지 못하지만 반응 타이머를 그 순간부터 미리 돌린다(타이밍만 훔친다).
 	PrimeWindow float64   // Smart: 마지막 쌍 신호로부터 이만큼(초) 지나면 미리 돈 타이머를 버린다
+	MinLead     float64   // Smart: 쌍 신호가 이만큼(초) 앞서 뜨지 않으면 사람은 그 타이밍을 못 써먹는다(0=기계)
+	RenderMode  Render    // 클라이언트가 받은 위치를 어떻게 그리는가
 	Reaction    float64   // 적을 처음 인지하고 손이 움직이기까지(초)
 	Omega       float64   // 에임 회전 속도(도/초)
 	Settle      float64   // 조준 완료 후 방아쇠까지(초)
@@ -70,10 +80,23 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 	if !h.started {
 		h.init()
 	}
+	// 0. 렌더링: 외삽(dead reckoning)이면 받은 위치+속도로 "지금" 위치를 추정해서 그린다
+	enemies := view.Enemies
+	if h.RenderMode == Extrapolate {
+		if dtSnap := now - view.Time; dtSnap > 0 {
+			adj := make([]gate.EnemyView, len(enemies))
+			for i, e := range enemies {
+				adj[i] = e
+				adj[i].Pos = e.Pos.Add(e.Vel.Scale(dtSnap))
+			}
+			enemies = adj
+		}
+	}
+
 	// 1. 이 사람이 "아는" 적: 화면에 보이는 적 + (월핵이면) 믿기로 한 벽 뒤 신호
 	var cand []gate.EnemyView
 	hidden := 0
-	for _, e := range view.Enemies {
+	for _, e := range enemies {
 		if m.LOS(self.Pos, e.Pos) {
 			cand = append(cand, e)
 			continue
@@ -109,7 +132,7 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 			}
 		}
 		h.target = best.ID
-		if h.Smart && h.primed {
+		if h.Smart && h.primed && now-h.primedAt >= h.MinLead {
 			h.reactDone = h.primedAt + h.Reaction // 타이머는 쌍 신호가 뜬 순간부터 이미 돌고 있었다
 		} else {
 			h.reactDone = now + h.Reaction

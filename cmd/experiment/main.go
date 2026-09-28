@@ -25,9 +25,10 @@ type agg struct {
 
 func run(cfg duel.Config, rounds int, seed uint64) agg {
 	r := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+	dr := rand.New(rand.NewPCG(seed^0xD3C0FEED, seed^0x1234567890ABCDEF))
 	var a agg
 	for i := 0; i < rounds; i++ {
-		res := duel.Round(cfg, r, &a.st)
+		res := duel.Round(cfg, r, dr, &a.st)
 		if res.Timeout {
 			a.to++
 			continue

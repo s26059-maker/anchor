@@ -13,17 +13,21 @@ import (
 
 type Human struct {
 	Rng        *rand.Rand
-	UsesHidden bool      // true = 월핵. 벽 뒤 적 데이터도 본다
-	Trust      float64   // 월핵이 벽 뒤 신호 하나를 믿고 움직일 확률 (1 = 전부 믿음)
-	Reaction   float64   // 적을 처음 인지하고 손이 움직이기까지(초)
-	Omega      float64   // 에임 회전 속도(도/초)
-	Settle     float64   // 조준 완료 후 방아쇠까지(초)
-	Anticipate float64   // 적이 화면에 실제로 나타난 뒤 최소 대기(초)
-	Tol        float64   // 조준 완료로 보는 오차(도)
-	Forget     float64   // 목표가 이만큼 안 보이면 포기(초)
-	Holds      []float64 // 할 일 없을 때 번갈아 지키는 각도들 (nil이면 가만히)
-	HoldEvery  float64   // 평균 몇 초마다 지키는 각도를 바꾸나
-	Aim        float64   // 현재 조준 방향(도)
+	UsesHidden bool    // true = 월핵. 벽 뒤 적 데이터도 본다
+	Trust      float64 // 월핵이 벽 뒤 신호 하나를 믿고 움직일 확률 (1 = 전부 믿음). Smart면 안 쓴다
+	Smart      bool    // SmartWallhack: 벽 뒤 신호는 "개수"로만 판단한다.
+	// 혼자 오면(=1) 미끼로 보고 완전히 무시(에임 불변). 쌍으로 오면(>=2) 방향은
+	// 얻지 못하지만 반응 타이머를 그 순간부터 미리 돌린다(타이밍만 훔친다).
+	PrimeWindow float64   // Smart: 마지막 쌍 신호로부터 이만큼(초) 지나면 미리 돈 타이머를 버린다
+	Reaction    float64   // 적을 처음 인지하고 손이 움직이기까지(초)
+	Omega       float64   // 에임 회전 속도(도/초)
+	Settle      float64   // 조준 완료 후 방아쇠까지(초)
+	Anticipate  float64   // 적이 화면에 실제로 나타난 뒤 최소 대기(초)
+	Tol         float64   // 조준 완료로 보는 오차(도)
+	Forget      float64   // 목표가 이만큼 안 보이면 포기(초)
+	Holds       []float64 // 할 일 없을 때 번갈아 지키는 각도들 (nil이면 가만히)
+	HoldEvery   float64   // 평균 몇 초마다 지키는 각도를 바꾸나
+	Aim         float64   // 현재 조준 방향(도)
 
 	started    bool
 	target     int
@@ -34,7 +38,15 @@ type Human struct {
 	missing    float64
 	hold       float64
 	ignored    map[int]bool
+	primed     bool
+	primedAt   float64
 }
+
+// OnScreenAt: 현재 목표가 화면(LOS)에 처음 나타난 시각. 아직이면 -1.
+func (h *Human) OnScreenAt() float64 { return h.onScreenAt }
+
+// AimedAt: 현재 목표에 에임이 처음 정렬된 시각. 아직이면 -1.
+func (h *Human) AimedAt() float64 { return h.aimedAt }
 
 func (h *Human) init() {
 	h.started = true
@@ -60,12 +72,20 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 	}
 	// 1. 이 사람이 "아는" 적: 화면에 보이는 적 + (월핵이면) 믿기로 한 벽 뒤 신호
 	var cand []gate.EnemyView
+	hidden := 0
 	for _, e := range view.Enemies {
 		if m.LOS(self.Pos, e.Pos) {
 			cand = append(cand, e)
 			continue
 		}
-		if !h.UsesHidden || h.ignored[e.ID] {
+		if !h.UsesHidden {
+			continue
+		}
+		if h.Smart {
+			hidden++ // 방향으로는 절대 안 쓴다. 개수만 센다
+			continue
+		}
+		if h.ignored[e.ID] {
 			continue
 		}
 		if e.ID != h.target && h.Rng.Float64() >= h.Trust {
@@ -73,6 +93,13 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 			continue
 		}
 		cand = append(cand, e)
+	}
+	if h.Smart {
+		if hidden >= 2 {
+			h.primed, h.primedAt = true, now // 쌍 신호: 타이머만 미리 시작, 에임은 그대로
+		} else if h.primed && h.PrimeWindow > 0 && now-h.primedAt > h.PrimeWindow {
+			h.primed = false // 한동안 쌍 신호가 없었다 — 미리 돈 타이머를 버린다
+		}
 	}
 	if h.target < 0 && len(cand) > 0 {
 		best := cand[0]
@@ -82,8 +109,13 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 			}
 		}
 		h.target = best.ID
-		h.reactDone = now + h.Reaction
+		if h.Smart && h.primed {
+			h.reactDone = h.primedAt + h.Reaction // 타이머는 쌍 신호가 뜬 순간부터 이미 돌고 있었다
+		} else {
+			h.reactDone = now + h.Reaction
+		}
 		h.onScreenAt, h.aimedAt, h.missing = -1, -1, 0
+		h.primed = false
 	}
 	if h.target < 0 {
 		if len(h.Holds) > 0 && h.HoldEvery > 0 {

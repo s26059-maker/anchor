@@ -13,6 +13,8 @@ import (
 )
 
 type Mixer struct {
+	// KeepVel: 진짜 적의 속도도 그대로 실어 보낸다. 기본(false)은 기존 동작(속도를 떼고 위치만 보낸다).
+	KeepVel bool
 	rng     *rand.Rand
 	handles map[int]int
 	used    map[int]bool
@@ -47,7 +49,11 @@ func (m *Mixer) Handle(realID int) int {
 func (m *Mixer) Mix(real []gate.EnemyView, fakes []gate.EnemyView) []gate.EnemyView {
 	out := make([]gate.EnemyView, 0, len(real)+len(fakes))
 	for _, e := range real {
-		out = append(out, gate.EnemyView{ID: m.Handle(e.ID), Pos: e.Pos})
+		v := gate.EnemyView{ID: m.Handle(e.ID), Pos: e.Pos}
+		if m.KeepVel {
+			v.Vel = e.Vel
+		}
+		out = append(out, v)
 	}
 	out = append(out, fakes...)
 	m.rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })

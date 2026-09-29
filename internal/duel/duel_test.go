@@ -175,3 +175,23 @@ func TestJitterDeterministic(t *testing.T) {
 		t.Fatalf("같은 시드인데 %d라운드 다름", d)
 	}
 }
+
+// 사격 등록 지연을 켜면 핑이 낮은 쪽이 이긴다: 피커 지연만 낮추면 피커 승률이 오른다.
+func TestShotLatencyPingMatters(t *testing.T) {
+	win := func(peekerMs float64) float64 {
+		c := Config{Latency: 0.02, Net: &netsim.Model{Mean: 0.02}, PeekerNet: &netsim.Model{Mean: peekerMs / 1000}, Holds: true, ShotLatency: true}
+		o := outcomes(c, 1500, 11, 12)
+		h, n := 0, 0
+		for _, v := range o {
+			if v >= 0 {
+				n++
+				h += v
+			}
+		}
+		return 1 - float64(h)/float64(n)
+	}
+	slow, fast := win(60), win(10)
+	if fast <= slow+0.02 {
+		t.Fatalf("피커 핑 10ms 승률 %.3f, 60ms 승률 %.3f — 핑이 승패에 영향이 없다", fast, slow)
+	}
+}

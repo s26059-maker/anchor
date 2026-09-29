@@ -81,6 +81,18 @@ type Config struct {
 	GeoWindow float64
 	// VerifyTicks: 검증형 월핵(>0). 벽 뒤 신호가 이 틱 수만큼 연속으로 떠 있어야 믿는다. bot.Human.VerifyTicks 참고.
 	VerifyTicks int
+
+	// ---- 2.8단계
+
+	// MeterQuantile: >0이면 적응형 선공개의 추정치를 평균 대신 최근 MeterWindow개 측정의 이 분위수로 쓴다.
+	MeterQuantile float64
+	// SpikeGap: >0이면 스파이크로 판단된 측정(중앙값보다 이만큼 초 넘게 늦음)을 추정에서 뺀다(팝인 허용).
+	SpikeGap float64
+	// PeekerNet: nil이 아니면 피커의 링크만 이 모델을 쓴다(Net은 홀더). 핑 환산용.
+	PeekerNet *netsim.Model
+	// ShotLatency: 사격이 서버에 등록되는 데 사격자의 상행 지연이 걸린다. 먼저 등록된 사격이 이긴다.
+	// 꺼져 있으면 사격은 그 틱에 즉시 판정된다(기존 동작). 핑이 승패에 영향을 주려면 켜야 한다.
+	ShotLatency bool
 }
 
 type Result struct {
@@ -166,12 +178,18 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 		holder.ID: {Delay: cfg.Latency},
 		peeker.ID: {Delay: cfg.Latency},
 	}
-	if net := netModel(cfg); net != nil {
+	shotLinks := map[int]*netsim.Link{}
+	if net0 := netModel(cfg); net0 != nil {
 		for _, p := range []*world.Player{holder, peeker} {
+			net := net0
+			if p == peeker && cfg.PeekerNet != nil {
+				net = cfg.PeekerNet
+			}
+			shotLinks[p.ID] = netsim.NewLink(*net, netSeed, uint64(p.ID)*2+100)
 			dl := lines[p.ID]
 			dl.Down = netsim.NewLink(*net, netSeed, uint64(p.ID)*2)
 			dl.Up = netsim.NewLink(*net, netSeed, uint64(p.ID)*2+1)
-			dl.Meter = &netsim.Meter{Window: cfg.MeterWindow, Initial: net.Mean}
+			dl.Meter = &netsim.Meter{Window: cfg.MeterWindow, Initial: net.Mean, Quantile: cfg.MeterQuantile, SpikeGap: cfg.SpikeGap}
 		}
 	}
 	g := cfg.Gate
@@ -248,6 +266,13 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 		pdHandle = pmix.NewHandle()
 	}
 	tInfoP, tArrP := -1.0, -1.0
+	type shot struct {
+		by  *world.Player
+		tid int
+		at  float64
+	}
+	var pending []shot
+	hasShot := map[int]bool{}
 	finish := func(res Result) Result {
 		res.PopIn, res.Leak, res.PeekerEv = -1, -1, -1
 		if tLOS >= 0 && tArrP >= 0 {
@@ -375,9 +400,38 @@ func Round(cfg Config, r *rand.Rand, decoyRng *rand.Rand, st *gate.Stats) Result
 			if p == peeker && cfg.PeekerDecoy {
 				tid = pmix.RealOf(tid)
 			}
+			if cfg.ShotLatency {
+				if !hasShot[p.ID] { // 등록을 기다리는 사격이 있으면 새로 안 쏜다
+					d := cfg.Latency
+					if l := shotLinks[p.ID]; l != nil {
+						d = l.Arrive(now) - now
+					}
+					pending = append(pending, shot{p, tid, now + d})
+					hasShot[p.ID] = true
+				}
+				continue
+			}
 			t := w.ByID(tid)
 			if t != nil && m.LOS(p.Pos, t.Pos) { // 판정은 서버 진실로
 				return finish(Result{HolderWon: p == holder, InfoLead: tLOS - tInfo, DecoyR: decoyR(), FastR: fastR})
+			}
+		}
+		// 등록 시각이 된 사격을 먼저 등록된 순서로 판정한다(서버 진실, 등록 시점의 위치)
+		for len(pending) > 0 {
+			bi := -1
+			for i, s := range pending {
+				if s.at <= now+1e-9 && (bi < 0 || s.at < pending[bi].at) {
+					bi = i
+				}
+			}
+			if bi < 0 {
+				break
+			}
+			s := pending[bi]
+			pending = append(pending[:bi], pending[bi+1:]...)
+			hasShot[s.by.ID] = false
+			if t := w.ByID(s.tid); t != nil && m.LOS(s.by.Pos, t.Pos) {
+				return finish(Result{HolderWon: s.by == holder, InfoLead: tLOS - tInfo, DecoyR: decoyR(), FastR: fastR})
 			}
 		}
 		// 증거: 미끼가 뜬 뒤 EvidWin 안에 홀더 에임이 미끼 출구로 갔나

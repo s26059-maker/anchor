@@ -26,9 +26,18 @@ type Human struct {
 	Smart      bool    // SmartWallhack: 벽 뒤 신호는 "개수"로만 판단한다.
 	// 혼자 오면(=1) 미끼로 보고 완전히 무시(에임 불변). 쌍으로 오면(>=2) 방향은
 	// 얻지 못하지만 반응 타이머를 그 순간부터 미리 돌린다(타이밍만 훔친다).
-	PrimeWindow float64   // Smart: 마지막 쌍 신호로부터 이만큼(초) 지나면 미리 돈 타이머를 버린다
-	MinLead     float64   // Smart: 쌍 신호가 이만큼(초) 앞서 뜨지 않으면 사람은 그 타이밍을 못 써먹는다(0=기계)
-	RenderMode  Render    // 클라이언트가 받은 위치를 어떻게 그리는가
+	PrimeWindow float64 // Smart: 마지막 쌍 신호로부터 이만큼(초) 지나면 미리 돈 타이머를 버린다
+	MinLead     float64 // Smart: 쌍 신호가 이만큼(초) 앞서 뜨지 않으면 사람은 그 타이밍을 못 써먹는다(0=기계)
+	RenderMode  Render  // 클라이언트가 받은 위치를 어떻게 그리는가
+	MaxExtrap   float64 // 외삽 렌더링의 최대 외삽 시간(초). 0이면 제한 없음(기존 동작)
+	// GeoWindow: 기하 필터 월핵(2.7단계). 벽 뒤 신호를 믿기 전에 "내가 지금 속도로 GeoWindow초
+	// 안에 그 위치를 볼 수 있나"를 확인해서, 못 볼 신호(=서버가 노출 임박이 아니라서 보낸 미끼)는 버린다.
+	// 0이면 끔(기존 동작). Trust 기반 월핵에만 적용된다.
+	GeoWindow float64
+	// VerifyTicks: 검증형 월핵(2.7단계). 벽 뒤 신호가 이 틱 수만큼 연속으로 떠 있어야 믿는다.
+	// 진짜 신호는 노출될 때까지 떠 있지만 띠 미끼는 불변식 때문에 금방 거둬지므로 걸러진다 —
+	// 대신 기다린 시간만큼 선공개로 얻은 예고 시간이 줄어든다. 0이면 끔(기존 동작).
+	VerifyTicks int
 	Reaction    float64   // 적을 처음 인지하고 손이 움직이기까지(초)
 	Omega       float64   // 에임 회전 속도(도/초)
 	Settle      float64   // 조준 완료 후 방아쇠까지(초)
@@ -48,6 +57,7 @@ type Human struct {
 	missing    float64
 	hold       float64
 	ignored    map[int]bool
+	seenTicks  map[int]int
 	primed     bool
 	primedAt   float64
 }
@@ -84,6 +94,9 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 	enemies := view.Enemies
 	if h.RenderMode == Extrapolate {
 		if dtSnap := now - view.Time; dtSnap > 0 {
+			if h.MaxExtrap > 0 && dtSnap > h.MaxExtrap {
+				dtSnap = h.MaxExtrap
+			}
 			adj := make([]gate.EnemyView, len(enemies))
 			for i, e := range enemies {
 				adj[i] = e
@@ -96,6 +109,10 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 	// 1. 이 사람이 "아는" 적: 화면에 보이는 적 + (월핵이면) 믿기로 한 벽 뒤 신호
 	var cand []gate.EnemyView
 	hidden := 0
+	var nowHidden map[int]int
+	if h.VerifyTicks > 0 {
+		nowHidden = map[int]int{}
+	}
 	for _, e := range enemies {
 		if m.LOS(self.Pos, e.Pos) {
 			cand = append(cand, e)
@@ -108,6 +125,15 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 			hidden++ // 방향으로는 절대 안 쓴다. 개수만 센다
 			continue
 		}
+		if h.GeoWindow > 0 && !h.exposureSoon(self, e, m) {
+			continue
+		}
+		if nowHidden != nil {
+			nowHidden[e.ID] = h.seenTicks[e.ID] + 1
+			if nowHidden[e.ID] < h.VerifyTicks {
+				continue
+			}
+		}
 		if h.ignored[e.ID] {
 			continue
 		}
@@ -116,6 +142,9 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 			continue
 		}
 		cand = append(cand, e)
+	}
+	if nowHidden != nil {
+		h.seenTicks = nowHidden
 	}
 	if h.Smart {
 		if hidden >= 2 {
@@ -189,4 +218,16 @@ func (h *Human) Update(now, dt float64, self *world.Player, view gate.Snapshot, 
 		now >= h.aimedAt+h.Settle &&
 		now >= h.onScreenAt+h.Anticipate
 	return fire, h.target
+}
+
+// exposureSoon: self가 지금 속도로, e가 받은 속도로 움직일 때 GeoWindow초 안에 LOS가 생기나.
+func (h *Human) exposureSoon(self *world.Player, e gate.EnemyView, m *world.Map) bool {
+	const n = 16
+	for k := 0; k <= n; k++ {
+		t := h.GeoWindow * float64(k) / n
+		if m.LOS(self.Pos.Add(self.Vel.Scale(t)), e.Pos.Add(e.Vel.Scale(t))) {
+			return true
+		}
+	}
+	return false
 }

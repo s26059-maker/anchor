@@ -4,6 +4,7 @@ package netsim
 import (
 	"math"
 	"math/rand/v2"
+	"sort"
 
 	"github.com/s26059-maker/anchor/internal/gate"
 )
@@ -57,8 +58,14 @@ func (l *Link) Arrive(sendTime float64) float64 {
 type Meter struct {
 	Window  int
 	Initial float64
-	pending []sample
-	known   []float64
+	// Quantile: 0이면 평균(기존 동작), (0,1]이면 그 분위수(예: 0.95)를 추정치로 쓴다.
+	Quantile float64
+	// SpikeGap: >0이면 알려진 중앙값보다 이만큼(초) 넘게 늦은 샘플은 스파이크로 보고 추정에 넣지 않는다.
+	// 스파이크 때는 선공개 여유를 늘리지 않고 팝인을 받아들인다는 뜻이다.
+	SpikeGap float64
+	Spikes   int // 걸러낸 스파이크 샘플 수
+	pending  []sample
+	known    []float64
 }
 
 type sample struct{ at, half float64 }
@@ -71,6 +78,10 @@ func (m *Meter) Estimate(now float64) float64 {
 	keep := m.pending[:0]
 	for _, s := range m.pending {
 		if s.at <= now {
+			if m.SpikeGap > 0 && len(m.known) >= 4 && s.half > median(m.known)+m.SpikeGap {
+				m.Spikes++
+				continue
+			}
 			m.known = append(m.known, s.half)
 		} else {
 			keep = append(keep, s)
@@ -87,11 +98,23 @@ func (m *Meter) Estimate(now float64) float64 {
 	if len(m.known) == 0 {
 		return m.Initial
 	}
+	if m.Quantile > 0 {
+		c := append([]float64(nil), m.known...)
+		sort.Float64s(c)
+		i := int(math.Ceil(m.Quantile*float64(len(c)))) - 1
+		return c[min(max(i, 0), len(c)-1)]
+	}
 	sum := 0.0
 	for _, v := range m.known {
 		sum += v
 	}
 	return sum / float64(len(m.known))
+}
+
+func median(xs []float64) float64 {
+	c := append([]float64(nil), xs...)
+	sort.Float64s(c)
+	return c[len(c)/2]
 }
 
 type item struct {

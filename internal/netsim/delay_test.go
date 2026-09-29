@@ -108,3 +108,42 @@ func TestMeterTracksLinkMean(t *testing.T) {
 		t.Fatalf("추정 %.4f, 기대 ≈0.03", est)
 	}
 }
+
+func TestMeterQuantile(t *testing.T) {
+	m := &Meter{Window: 100, Quantile: 0.9}
+	for i := 1; i <= 100; i++ {
+		m.add(0, float64(i)/1000)
+	}
+	if got := m.Estimate(1); math.Abs(got-0.090) > 1e-12 {
+		t.Fatalf("p90 = %v, 0.090 기대", got)
+	}
+	m.Quantile = 1
+	if got := m.Estimate(1); math.Abs(got-0.100) > 1e-12 {
+		t.Fatalf("p100 = %v", got)
+	}
+}
+
+func TestMeterSpikeRejection(t *testing.T) {
+	m := &Meter{Window: 16, SpikeGap: 0.025}
+	for i := 0; i < 8; i++ {
+		m.add(0, 0.020)
+	}
+	m.add(0, 0.080) // 스파이크
+	m.add(0, 0.030) // 정상 범위(중앙값+25ms 이내)
+	got := m.Estimate(1)
+	if m.Spikes != 1 {
+		t.Fatalf("스파이크 %d개 걸러짐, 1개 기대", m.Spikes)
+	}
+	if want := (8*0.020 + 0.030) / 9; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("추정 %v, 기대 %v", got, want)
+	}
+	// 끄면 스파이크가 평균을 끌어올린다
+	m2 := &Meter{Window: 16}
+	for i := 0; i < 8; i++ {
+		m2.add(0, 0.020)
+	}
+	m2.add(0, 0.080)
+	if m2.Estimate(1) <= 0.025 {
+		t.Fatal("스파이크 허용을 껐는데 평균이 안 올라감")
+	}
+}

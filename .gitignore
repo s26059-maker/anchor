@@ -1,0 +1,8 @@
+.claude/
+*.exe
+*.test
+*.out
+*.log
+.env
+*.pem
+*.key

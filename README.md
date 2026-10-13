@@ -16,6 +16,7 @@ FPS 핵을 "잡는" 게 아니라 **핵이 얻을 이득을 구조적으로 0으
 ## 관련 레포
 
 - [anchor-mc](https://github.com/s26059-maker/anchor-mc): 이 설계를 Paper 서버 플러그인(마인크래프트 엑스레이 차단, 섀도 모드)으로 옮긴 구현
+- [anchor-cs2](https://github.com/s26059-maker/anchor-cs2): 같은 설계를 CS2 서버 플러그인(CounterStrikeSharp)으로 옮기는 구현. 가시성 게이트와 판정 엔진은 구현됐고, 클라이언트 확인과 미끼 표시는 아직
 - 블로그: [보이지 않는 다이아로 엑스레이 핵 잡기](https://velog.io/@sw100222/보이지-않는-다이아로-엑스레이-핵-잡기)
 
 ## 라이선스
